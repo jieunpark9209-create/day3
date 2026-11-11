@@ -56,10 +56,30 @@ def run_collect(hours: int = 1) -> dict:
     return entry
 
 
+def seed_demo(hours: int = 72) -> None:
+    """예측 체험용: 연습 데이터(source='demo') 72시간치를 한 번 채운다.
+    실제 데이터(airkorea)와 source 컬럼이 달라서 섞이지 않는다."""
+    rows, stats = collect.clean(collect.fake_raw(hours), SIDO, "demo")
+    saved = store.save_readings(rows)
+    store.save_log({"ran_at": datetime.now(timezone.utc).isoformat(), "source": "demo",
+                    **stats, "saved": saved})
+
+
+def pick_source(source: str | None) -> str:
+    if source is None:
+        return SOURCE
+    if source not in ("demo", "airkorea"):
+        raise HTTPException(400, "source 는 demo 또는 airkorea")
+    return source
+
+
 async def auto_loop():
     """서버가 켜져 있는 동안 COLLECT_MINUTES마다 자동 수집"""
-    if DEMO and not store.recent(SOURCE, 1):
-        await asyncio.to_thread(run_collect, 72)
+    if not store.recent("demo", 1):  # 연습 데이터가 없으면 한 번 채운다
+        try:
+            await asyncio.to_thread(seed_demo)
+        except Exception:
+            log.exception("연습 데이터 채우기 실패")
     while True:
         try:
             await asyncio.to_thread(run_collect)
@@ -108,8 +128,8 @@ def collect_now(x_admin_token: str = Header(default=""),
         raise HTTPException(502, str(e))
 
 
-def _latest_rows():
-    rows = store.recent(SOURCE)
+def _latest_rows(source: str):
+    rows = store.recent(source)
     seen, latest = set(), []
     for r in rows:  # 시각 내림차순 → 측정소별 첫 행이 최신
         if r["station"] not in seen:
@@ -119,8 +139,8 @@ def _latest_rows():
 
 
 @app.get("/air/latest")
-def air_latest():
-    rows = _latest_rows()
+def air_latest(source: str | None = None):
+    rows = _latest_rows(pick_source(source))
     rows.sort(key=lambda r: r["pm10"] or 0, reverse=True)
     return [{"station": r["station"], "time": db.kst(r["data_time"]),
              "pm10": r["pm10"], "pm10_grade": r["pm10_grade"],
@@ -128,15 +148,16 @@ def air_latest():
 
 
 @app.get("/air/summary")
-def air_summary():
-    rows = _latest_rows()
+def air_summary(source: str | None = None):
+    source = pick_source(source)
+    rows = _latest_rows(source)
     pm10s = [r["pm10"] for r in rows if r["pm10"] is not None]
     pm25s = [r["pm25"] for r in rows if r["pm25"] is not None]
     worst = max(rows, key=lambda r: r["pm10"] or 0) if rows else None
     logs = store.logs(1)
     avg10 = round(sum(pm10s) / len(pm10s)) if pm10s else None
     return {
-        "mode": SOURCE,
+        "mode": source,
         "stations": len(rows),
         "avg_pm10": avg10,
         "avg_pm25": round(sum(pm25s) / len(pm25s)) if pm25s else None,
@@ -147,8 +168,8 @@ def air_summary():
 
 
 @app.get("/air/predict")
-def air_predict(station: str):
-    hist = store.history(SOURCE, station)
+def air_predict(station: str, source: str | None = None):
+    hist = store.history(pick_source(source), station)
     if not hist:
         raise HTTPException(404, f"'{station}' 측정소 데이터가 없습니다")
     return {"station": station, **predict.predict_next(hist)}
