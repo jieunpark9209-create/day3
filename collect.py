@@ -26,7 +26,9 @@ def fetch_raw(sido: str, service_key: str) -> list[dict]:
         "ver": "1.0",
     }
     r = httpx.get(API_URL, params=params, timeout=20)
-    r.raise_for_status()
+    if r.status_code >= 400:
+        # httpx 의 기본 오류는 주소(인증키 포함)를 로그에 남기므로 키 없이 직접 만든다
+        raise RuntimeError(f"공공데이터 API HTTP {r.status_code}: {r.text.strip()[:300]}")
     text = r.text.strip()
     if not text.startswith("{"):  # 키가 틀리면 XML 오류가 온다
         raise RuntimeError("공공데이터 API 오류(키 확인): " + text[:200])

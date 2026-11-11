@@ -36,13 +36,22 @@ FRONT_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("FRONT_ORIGINS", "").s
 store = db.get_store()
 
 
+last_error: str | None = None  # 마지막 수집 실패 이유 (/health 에서 확인)
+
+
 def run_collect(hours: int = 1) -> dict:
-    items = collect.fake_raw(hours) if DEMO else collect.fetch_raw(SIDO, DATA_KEY)
-    rows, stats = collect.clean(items, SIDO, SOURCE)
-    saved = store.save_readings(rows)
-    entry = {"ran_at": datetime.now(timezone.utc).isoformat(), "source": SOURCE,
-             **stats, "saved": saved}
-    store.save_log(entry)
+    global last_error
+    try:
+        items = collect.fake_raw(hours) if DEMO else collect.fetch_raw(SIDO, DATA_KEY)
+        rows, stats = collect.clean(items, SIDO, SOURCE)
+        saved = store.save_readings(rows)
+        entry = {"ran_at": datetime.now(timezone.utc).isoformat(), "source": SOURCE,
+                 **stats, "saved": saved}
+        store.save_log(entry)
+    except Exception as e:
+        last_error = f"{datetime.now(timezone.utc).isoformat()} {e}"[:400]
+        raise
+    last_error = None
     log.info("collect %s", entry)
     return entry
 
@@ -55,7 +64,7 @@ async def auto_loop():
         try:
             await asyncio.to_thread(run_collect)
         except Exception:
-            log.exception("자동 수집 실패")
+            log.error("자동 수집 실패: %s", last_error)
         await asyncio.sleep(MINUTES * 60)
 
 
@@ -82,7 +91,8 @@ def health():
     missing = [k for k in ["SUPABASE_URL", "SUPABASE_SECRET_KEY", "DATA_GO_KR_KEY",
                            "ADMIN_TOKEN", "FRONT_ORIGINS"] if not os.getenv(k, "").strip()]
     return {"ok": True, "mode": SOURCE, "store": store.kind,
-            "auto_collect_minutes": MINUTES if AUTO else None, "missing": missing}
+            "auto_collect_minutes": MINUTES if AUTO else None, "missing": missing,
+            "last_error": last_error}
 
 
 @app.post("/collect")
